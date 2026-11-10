@@ -1,0 +1,146 @@
+
+name: CI/CD - SobreMim
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  # CI - Integracao Continua
+  validate:
+    name: Validar estrutura do projeto
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do repositorio
+        uses: actions/checkout@v6
+
+      - name: Validar arquivos obrigatorios
+        run: |
+          echo "Verificando estrutura do projeto..."
+
+          test -f index.html || {
+            echo "ERRO: index.html nao encontrado"
+            exit 1
+          }
+
+          test -f style.css || {
+            echo "ERRO: style.css nao encontrado"
+            exit 1
+          }
+
+          test -d images || {
+            echo "ERRO: pasta images nao encontrada"
+            exit 1
+          }
+
+          echo "Arquivos obrigatorios encontrados!"
+
+      - name: Validar referencia ao CSS
+        run: |
+          if ! grep -Eq '<link[^>]+href=["\047][^"\047]*style\.css(["\047])' index.html; then
+            echo "ERRO: style.css nao esta referenciado no HTML"
+            exit 1
+          fi
+
+          echo "Referencia ao CSS encontrada!"
+
+      - name: Validar imagens locais
+        run: |
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          from urllib.parse import unquote, urlsplit
+          import sys
+
+          root = Path.cwd()
+          errors = []
+
+          class ImageValidator(HTMLParser):
+              def handle_starttag(self, tag, attrs):
+                  if tag != "img":
+                      return
+
+                  attrs = dict(attrs)
+                  src = attrs.get("src", "")
+
+                  if not src:
+                      errors.append("Imagem sem atributo src")
+                      return
+
+                  parsed = urlsplit(src)
+
+                  if parsed.scheme or src.startswith("//"):
+                      return
+
+                  if not parsed.path:
+                      return
+
+                  path = unquote(parsed.path)
+
+                  if path.startswith("/"):
+                      target = root / path.lstrip("/")
+                  else:
+                      target = root / path
+
+                  if not target.is_file():
+                      errors.append(f"Imagem nao encontrada: {src}")
+
+          validator = ImageValidator()
+          validator.feed((root / "index.html").read_text(encoding="utf-8"))
+
+          if errors:
+              for error in errors:
+                  print(f"ERRO: {error}")
+              sys.exit(1)
+
+          print("Todas as imagens locais foram encontradas!")
+          PY
+
+  # CD - Deployment
+  deploy:
+    name: Deploy no GitHub Pages
+    runs-on: ubuntu-latest
+
+    needs: validate
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout do repositorio
+        uses: actions/checkout@v6
+
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Preparar arquivos do site
+        run: |
+          mkdir -p _site
+          cp index.html style.css _site/
+          cp -R images _site/images
+
+      - name: Enviar artefato para publicacao
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ./_site
+
+      - name: Publicar no GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
